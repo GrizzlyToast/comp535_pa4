@@ -7,12 +7,19 @@
 #define SEG_SIZE 1024
 #define HEADER_SIZE sizeof(struct Header)
 #define MSS (SEG_SIZE - HEADER_SIZE)
+#define BUFFER_SIZE 100
 
 struct Header {
     uint32_t sequence_number;
     uint32_t file_id;
     uint32_t total_chunks;
 };
+
+typedef struct {
+    char data[SEG_SIZE];
+    uint32_t sequence_number;
+    uint32_t file_id;
+} ChunkBuffer;
 
 // function to calc the checksum by summing all the bytes of the data
 uint32_t calculate_checksum(const char *data, size_t length) {
@@ -24,6 +31,8 @@ uint32_t calculate_checksum(const char *data, size_t length) {
 }
 
 int main(int argc, char *argv[]) {
+    ChunkBuffer chunk_buffer[BUFFER_SIZE];
+    int buffer_head = 0;
     mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
 
     // check that there is at least 1 file
@@ -43,8 +52,13 @@ int main(int argc, char *argv[]) {
         }
 
         // define variables
+        fseek(file, 0, SEEK_END);
         long file_size = ftell(file);
+        fseek(file, 0, SEEK_SET);        
         uint32_t total_chunks = (file_size + MSS - 1) / MSS;
+        if (total_chunks == 0 && file_size > 0) {
+            total_chunks = 1;
+        }
         char buffer[MSS];
         size_t bytesRead;
         uint32_t sequence_number = 0;
@@ -61,15 +75,26 @@ int main(int argc, char *argv[]) {
             // combine the header with the chunk data
             char *chunk_data = malloc(SEG_SIZE);
             memcpy(chunk_data, &header, HEADER_SIZE);
-            memcpy(chunk_data + HEADER_SIZE, buffer, MSS);
+            memcpy(chunk_data + HEADER_SIZE, buffer, bytesRead);
 
             // calc the checksum value
             uint32_t checksum = calculate_checksum(chunk_data, SEG_SIZE - sizeof(uint32_t));
             // inset the checksum value at the end of the segment
             memcpy(chunk_data + SEG_SIZE - sizeof(uint32_t), &checksum, sizeof(uint32_t));
     
+            for (size_t i = 0; i < SEG_SIZE; i++) {
+                printf("%02x ", (unsigned char)chunk_data[i]);
+            }
+            printf("\n");
+
             // multicast the segment
             multicast_send(m, chunk_data, SEG_SIZE);
+
+            // save the chunk in the chunk buffer
+            memcpy(chunk_buffer[buffer_head].data, chunk_data, SEG_SIZE);
+            chunk_buffer[buffer_head].sequence_number = sequence_number;
+            chunk_buffer[buffer_head].file_id = file_id;
+            buffer_head = (buffer_head + 1) % BUFFER_SIZE;
 
             free(chunk_data);
 
