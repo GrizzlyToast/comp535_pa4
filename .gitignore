@@ -56,4 +56,5 @@ share/test.csv
 share/train.csv
 
 sender
+receiver
 test
