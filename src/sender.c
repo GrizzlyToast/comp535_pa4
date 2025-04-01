@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #define SEG_SIZE 1024
 #define HEADER_SIZE sizeof(struct Header)
@@ -83,7 +84,8 @@ int main(int argc, char *argv[]) {
             memcpy(chunk_data + SEG_SIZE - sizeof(uint32_t), &checksum, sizeof(uint32_t));
     
             for (size_t i = 0; i < SEG_SIZE; i++) {
-                printf("%02x ", (unsigned char)chunk_data[i]);
+                unsigned char c = (unsigned char)chunk_data[i];
+                printf("%c", isprint(c) ? c : '.');  // Print character if printable, otherwise print '.'
             }
             printf("\n");
 
