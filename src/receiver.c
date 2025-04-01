@@ -46,12 +46,20 @@ int main() {
         }
     }
 
-    // TODO: Write the ordered_msg array to a file
-    // FILE *file = fopen("filename", "w");
-    // int results = fputs(array, file);
-    // if (results == EOF) {
-    //     // Failed to write do error code here.
-    // }
-    // fclose(file);
+    void write_to_file(const char *filename, const char *data, size_t size) {
+        FILE *file = fopen(filename, "w");
+        if (file == NULL) {
+            perror("Failed to open file");
+            return;
+        }
+        size_t written = fwrite(data, 1, size, file);
+        if (written != size) {
+            perror("Failed to write complete data to file");
+        }
+        fclose(file);
+    }
+
+    // Call the function to write ordered_msg to a file
+    write_to_file("output_file", ordered_msg, total_chunks * chunk_size);
 }
 
