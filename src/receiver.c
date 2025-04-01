@@ -3,6 +3,8 @@
 #include "stdlib.h"
 #include "string.h"
 
+#define SEG_SIZE 1024
+
 uint32_t calculate_checksum(char *data, size_t length) {
     uint32_t checksum = 0;
     for (size_t i = 0; i < length; i++) {
@@ -34,13 +36,15 @@ int main() {
     mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
     const int buffer_size = 1024;
     char buffer[buffer_size];
-
+    printf("before block");
     // Assumes we have to receive the first message to get the header that contains important information
     multicast_setup_recv(m);
     if (multicast_check_receive(m) > 0) {
         multicast_receive(m, buffer, buffer_size);
         // Blocks until the first message is received
     }
+    printf("after block");
+
     uint32_t init_seq = *(uint32_t *)&buffer[0];
     uint32_t init_file_ID = *(uint32_t *)&buffer[4];
     uint32_t total_chunks = *(uint32_t *)&buffer[8];
