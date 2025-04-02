@@ -9,11 +9,14 @@
 #define HEADER_SIZE sizeof(struct Header)
 #define MSS (SEG_SIZE - HEADER_SIZE)
 #define BUFFER_SIZE 100
+#define MAX_FILENAME_LEN 32
 
 struct Header {
     uint32_t sequence_number;
-    uint32_t file_id;
+    char file_id[MAX_FILENAME_LEN];
     uint32_t total_chunks;
+    uint32_t num_files;
+    uint32_t chunk_size;
 };
 
 typedef struct {
@@ -72,8 +75,11 @@ int main(int argc, char *argv[]) {
                 // TODO: checksum
                 struct Header header;
                 header.sequence_number = sequence_number;
-                header.file_id = file_id;
+                strncpy(header.file_id, argv[i], MAX_FILENAME_LEN - 1);
+                header.file_id[MAX_FILENAME_LEN - 1] = '\0';
                 header.total_chunks = total_chunks;
+                header.num_files = argc - 1;
+                header.chunk_size = bytesRead;
 
                 // combine the header with the chunk data
                 char *chunk_data = malloc(SEG_SIZE);
@@ -85,11 +91,12 @@ int main(int argc, char *argv[]) {
                 // inset the checksum value at the end of the segment
                 memcpy(chunk_data + SEG_SIZE - sizeof(uint32_t), &checksum, sizeof(uint32_t));
         
-                printf("Sequence: %u\n", *(uint32_t*)&chunk_data[0]);
-                printf("File ID: %u\n", *(uint32_t*)&chunk_data[4]);
-                printf("Total Chunks: %u\n", *(uint32_t*)&chunk_data[8]);
-                printf("----------------------------\n");
-
+                // printf("Sequence: %u\n", *(uint32_t*)&chunk_data[0]);
+                // printf("File ID: %u\n", *(uint32_t*)&chunk_data[4]);
+                // printf("Total Chunks: %u\n", *(uint32_t*)&chunk_data[8]);
+                // printf("----------------------------\n");
+                //printf("%d", argc -1);
+                printf("%zu", bytesRead);
 
                 // multicast the segment
                 multicast_send(m, chunk_data, SEG_SIZE);

@@ -1,71 +1,172 @@
 #include "multicast.h"
-#include "stdio.h"
-#include "stdlib.h"
-#include "string.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <unistd.h>
 
-uint32_t calculate_checksum(char *data, size_t length) {
-    uint32_t checksum = 0;
-    for (size_t i = 0; i < length; i++) {
-        checksum += (unsigned char)data[i];
+#define CHUNK_SIZE 1024
+#define MAX_FILENAME_LEN 32
+#define HEADER_SIZE (MAX_FILENAME_LEN+16)
+#define MAX_DATA_SIZE (CHUNK_SIZE - HEADER_SIZE - sizeof(uint32_t))
+
+typedef struct FileReconstructor {
+    char file_id[MAX_FILENAME_LEN];
+    uint32_t total_chunks;
+    uint32_t received_chunks;
+    uint32_t received_bytes;
+    char *file_buffer;
+    struct FileReconstructor *next;
+} FileReconstructor;
+
+FileReconstructor *reconstructor_list = NULL;
+
+FileReconstructor* create_reconstructor (const char *filename, uint32_t total_chunks) {
+    FileReconstructor *new_rec = malloc(sizeof(FileReconstructor));
+    if (!new_rec) return NULL;
+    strncpy(new_rec->file_id, filename, MAX_FILENAME_LEN - 1);
+    new_rec->file_id[MAX_FILENAME_LEN - 1] = '\0';
+
+    new_rec->total_chunks = total_chunks;
+    new_rec->received_chunks = 0;
+    new_rec->received_bytes = 0;
+
+    new_rec->file_buffer = malloc(total_chunks * CHUNK_SIZE);
+    if (!new_rec->file_buffer) {
+        free(new_rec);
+        return NULL;
     }
-    return checksum;
+    memset(new_rec->file_buffer, 0, total_chunks * CHUNK_SIZE);
+
+    new_rec->next = reconstructor_list;
+    reconstructor_list = new_rec;
+
+    return new_rec;
 }
 
-int verify_checksum(char *data, size_t size, uint32_t expected_checksum) {
-    uint32_t calculated_checksum = calculate_checksum(data, size);
-    return (calculated_checksum == expected_checksum) ? 1 : 0;
-}
-
-void write_to_file(const char *filename, const char *data, size_t size) {
-    FILE *file = fopen(filename, "w");
-    if (file == NULL) {
-        perror("Failed to open file");
+void process_chunk(FileReconstructor *rec, uint32_t seq_num, const char *chunk_data, uint32_t data_size) {
+    if (seq_num >= rec->total_chunks*CHUNK_SIZE) {
+        fprintf(stderr, "Invalid sequence %u for file %s\n", seq_num, rec->file_id);
         return;
     }
-    size_t written = fwrite(data, 1, size, file);
-    if (written != size) {
-        perror("Failed to write complete data to file");
+
+    if (rec->file_buffer[seq_num] == '\0') {
+        memcpy(&rec->file_buffer[seq_num], 
+               chunk_data, 
+               data_size);
+        rec->received_chunks++;
+        rec->received_bytes += data_size;
+        
+        printf("File %s: %u/%u chunks (%.1f%%)\n", 
+               rec->file_id,
+               rec->received_chunks,
+               rec->total_chunks,
+               (float)rec->received_chunks/rec->total_chunks*100);
     }
-    fclose(file);
 }
 
-//Receiver setup
+FileReconstructor* find_reconstructor(char *file_id) {
+    FileReconstructor *current = reconstructor_list;
+    while (current != NULL) {
+        if (strcmp(current->file_id, file_id) == 0) { 
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+const char *get_basename(const char *path) {
+    const char *base = strrchr(path, '/');
+    return base ? base + 1 : path;  // Skip the '/' character
+}
+
+void save_and_remove(FileReconstructor *rec, uint32_t *files_left) {
+    const char *filename = get_basename(rec->file_id);
+    FILE *file = fopen(filename, "wb");
+    if (file) {
+        fwrite(rec->file_buffer, 1, rec->received_bytes, file);
+        fclose(file);
+        printf("Saved %s (%u chunks)\n", rec->file_id, rec->total_chunks);
+        (*files_left)--;
+    }
+    
+    // Remove from list
+    if (reconstructor_list == rec) {
+        reconstructor_list = rec->next;
+    } else {
+        FileReconstructor *prev = reconstructor_list;
+        while (prev && prev->next != rec) prev = prev->next;
+        if (prev) prev->next = rec->next;
+    }
+    
+    free(rec->file_buffer);
+    free(rec);
+}
+
+
 int main() {
     mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
-    const int buffer_size = 1024;
-    char buffer[buffer_size];
 
+    unsigned char buffer[CHUNK_SIZE];
+    uint32_t files_left = -1;
 
     multicast_setup_recv(m);
+    printf("Receiver ready. Processing multiple files...\n");
 
-    printf("Receiver ready. Waiting for data...\n");
-    
     while (1) {
         if (multicast_check_receive(m) > 0) {
-            int bytes_received = multicast_receive(m, buffer, buffer_size);
-            if (bytes_received <= 0) {
-                perror("Receive error");
-                continue;
+            int bytes_received = multicast_receive(m, buffer, CHUNK_SIZE);
+            if (bytes_received <= 0) continue;
+
+            // Parse header
+            uint32_t seq_num = *(uint32_t*)&buffer[0];
+
+            char file_id[MAX_FILENAME_LEN + 1];
+            strncpy(file_id, (const char*)&buffer[4], MAX_FILENAME_LEN);
+            uint32_t total_chunks = *(uint32_t*)&buffer[36];
+            uint32_t num_files = *(uint32_t*)&buffer[40];
+            uint32_t data_size = *(uint32_t*)&buffer[44];
+            uint32_t checksum = *(uint32_t*)&buffer[CHUNK_SIZE-4];
+
+            // Verify checksum
+            // if (calculate_checksum(buffer, buffer_size-4) != checksum) {
+            //     fprintf(stderr, "Bad checksum for file %u chunk %u\n", file_id, seq_num);
+            //     continue;
+            // }
+
+            if (files_left == -1) {
+                // init num files
+                files_left = num_files;
             }
 
-            // Parse and print structured information if available
-            if (bytes_received >= 12) {  // Minimum header size
-                printf("Structured Data:\n");
-                printf("Sequence: %u\n", *(uint32_t*)&buffer[0]);
-                printf("File ID: %u\n", *(uint32_t*)&buffer[4]);
-                printf("Total Chunks: %u\n", *(uint32_t*)&buffer[8]);
-                
-                if (bytes_received > 12) {
-                    printf("Payload Size: %d bytes\n", bytes_received - 12);
-                }
+            if (files_left == 0) {
+                // finished reading files, stop
+                printf("finished reading files.");
+                break;
             }
-            printf("----------------------------\n");
-        } else {
-            //usleep(100000);  // Sleep 100ms to prevent CPU spin
+
+            // Find or create reconstructor
+            FileReconstructor *rec = find_reconstructor(file_id);
+            if (!rec) {
+                rec = create_reconstructor(file_id, total_chunks);
+                printf("New file detected: ID=%s (%u chunks)\n", file_id, total_chunks);
+            }
+
+            // Process chunk
+            process_chunk(rec, seq_num, (char*)&buffer[HEADER_SIZE], data_size);
+
+            // Check completion
+            if (rec->received_chunks == rec->total_chunks) {
+                save_and_remove(rec, &files_left);
+            }
+
         }
+        // } else {
+        //     usleep(10000); // 10ms delay
+        // }
     }
 
     //multicast_close(m);
     return 0;
 }
-

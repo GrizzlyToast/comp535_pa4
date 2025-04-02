@@ -47,7 +47,7 @@ void receive(int total_chunks, mcast_t *m, char *ordered_msg, int chunk_size, in
     }
 }
 
-contains_null(char *buffer, int size) {
+int contains_null(char *buffer, int size) {
     for (int i = 0; i < size; i++) {
         if (buffer[i] == '\0') {
             return 1;
@@ -79,7 +79,7 @@ int main(int argc, char *argv[]) {
     const int chunk_size = (buffer_size - 12);
     char *ordered_msg;
     ordered_msg = (char *)malloc(total_chunks * chunk_size);
-    memset(ordered_msg, NULL, total_chunks * chunk_size);
+    memset(ordered_msg, '\0', total_chunks * chunk_size);
 
     // TODO: Add the initial chunk from the buffer above to the ordered_msg array
     while(contains_null(ordered_msg, total_chunks * chunk_size)) {
