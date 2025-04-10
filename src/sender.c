@@ -4,26 +4,64 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <stdbool.h>
 
-#define SEG_SIZE 1024
-#define HEADER_SIZE sizeof(struct Header)
-#define MSS (SEG_SIZE - HEADER_SIZE)
-#define BUFFER_SIZE 100
+#define CHUNK_SIZE 1024
 #define MAX_FILENAME_LEN 32
+#define HEADER_SIZE (MAX_FILENAME_LEN+20)
+#define MAX_DATA_SIZE (CHUNK_SIZE - HEADER_SIZE - sizeof(uint32_t))
 
-struct Header {
-    uint32_t sequence_number;
-    char file_id[MAX_FILENAME_LEN];
-    uint32_t total_chunks;
-    uint32_t num_files;
-    uint32_t chunk_size;
-};
+typedef struct Client {
+    uint32_t id;
+    uint32_t files_downloaded;
+    struct Client *next;
+} Client;
 
-typedef struct {
-    char data[SEG_SIZE];
-    uint32_t sequence_number;
-    uint32_t file_id;
-} ChunkBuffer;
+Client *client_list = NULL;
+volatile int count = 30;
+volatile int clients = 0;
+
+void add_client(uint32_t id) {
+    // Create a new client
+    Client *new_client = malloc(sizeof(Client));
+    if (new_client == NULL) {
+        perror("Failed to allocate memory for new client");
+        return;
+    }
+
+    // Initialize the new client
+    new_client->id = id;
+    new_client->files_downloaded = 0;
+    new_client->next = client_list;
+    client_list = new_client;
+}
+
+void update_client(uint32_t id) {
+    Client *current = client_list;
+    while (current != NULL) {
+        if (current->id == id) {
+            current->files_downloaded += 1;
+        }
+        current = current->next;
+    }
+}
+
+void print_clients(int num_clients, int time) {
+    printf("Ending session in %ds\n", time);
+    printf("Active Clients: %d\n", num_clients);
+
+    printf("ID   files_downloaded\n");
+    int c = 0;
+    Client *current = client_list;
+    while (current != NULL) {
+        c++;
+        printf("%d    %d\n", current->id, current->files_downloaded);
+        current = current->next;
+    }
+    printf("\033[%dA", c + 3);
+}
 
 // function to calc the checksum by summing all the bytes of the data
 uint32_t calculate_checksum(const char *data, size_t length) {
@@ -34,14 +72,81 @@ uint32_t calculate_checksum(const char *data, size_t length) {
     return checksum;
 }
 
+
+
+void* listen_for_clients() {
+    //printf("Starting file distribution service\n\n");
+    mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
+    multicast_setup_recv(m);
+    unsigned char buffer[CHUNK_SIZE];
+
+    while (1) {
+        if (multicast_check_receive(m) > 0) {
+            int bytes_received = multicast_receive(m, buffer, CHUNK_SIZE);
+            if (bytes_received <= 0) continue;
+
+            uint32_t type = *(uint32_t*)&buffer[0];
+            uint32_t join = *(uint32_t*)&buffer[4];
+            uint32_t id = *(uint32_t*)&buffer[8];
+
+            if (type == 1) {
+                if (join == 1) {
+                    clients++;
+                    add_client(id);
+                    //printf("\r\033[KActive Clients: %d", clients);
+                    print_clients(clients, count);
+                    fflush(stdout);
+                    count = 30;
+                }
+                else if (join == 2) {
+                    update_client(id);
+                    print_clients(clients, count);
+                }
+                else {
+                    clients--;
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+void* countdown () {
+    while (count >= 0) {
+        if (clients == 0) {
+            //printf("\rEnding session in %ds ", count);
+            //fflush(stdout);
+            print_clients(clients, count);
+            count--;
+        }
+        sleep(1);
+    }
+    printf("\r\033[Kquitting...\n");
+    exit(1);
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
-    ChunkBuffer chunk_buffer[BUFFER_SIZE];
-    int buffer_head = 0;
     mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
 
     // check that there is at least 1 file
-    if (argc != 2) {
+    if (argc < 2) {
         printf("Usage: %s <filename1> <filename2> <filename3> ...\n", argv[0]);
+        return 1;
+    }
+
+    // start thread to listen for clients
+    pthread_t thread_id;
+    if (pthread_create(&thread_id, NULL, listen_for_clients, NULL) != 0) {
+        perror("Failed to create thread");
+        return 1;
+    }
+
+    // start thread to listen for clients
+    pthread_t thread_id2;
+    if (pthread_create(&thread_id2, NULL, countdown, NULL) != 0) {
+        perror("Failed to create thread");
         return 1;
     }
 
@@ -61,56 +166,59 @@ int main(int argc, char *argv[]) {
             fseek(file, 0, SEEK_END);
             long file_size = ftell(file);
             fseek(file, 0, SEEK_SET);        
-            uint32_t total_chunks = (file_size + MSS - 1) / MSS;
+            uint32_t total_chunks = (file_size + MAX_DATA_SIZE - 1) / MAX_DATA_SIZE;
             if (total_chunks == 0 && file_size > 0) {
                 total_chunks = 1;
             }
-            char buffer[MSS];
+            char buffer[MAX_DATA_SIZE];
             size_t bytesRead;
             uint32_t sequence_number = 0;
+            uint32_t num_files = argc - 1;
 
             // read bytes from file into chunks
-            while ((bytesRead = fread(buffer, 1, MSS, file)) > 0) {
-                // create header info 
-                // TODO: checksum
-                struct Header header;
-                header.sequence_number = sequence_number;
-                strncpy(header.file_id, argv[i], MAX_FILENAME_LEN - 1);
-                header.file_id[MAX_FILENAME_LEN - 1] = '\0';
-                header.total_chunks = total_chunks;
-                header.num_files = argc - 1;
-                header.chunk_size = bytesRead;
+            while ((bytesRead = fread(buffer, 1, MAX_DATA_SIZE, file)) > 0) {              
+                // create chunk and add data
+                char *chunk = malloc(CHUNK_SIZE);
 
-                // combine the header with the chunk data
-                char *chunk_data = malloc(SEG_SIZE);
-                memcpy(chunk_data, &header, HEADER_SIZE);
-                memcpy(chunk_data + HEADER_SIZE, buffer, bytesRead);
+                // add header data
+                uint32_t type = 0;
+                memcpy(chunk, &type, 4);
+
+                memcpy(chunk + 4, &sequence_number, 4);
+
+                strncpy(chunk + 8, argv[i], MAX_FILENAME_LEN - 1);
+                chunk[8 + MAX_FILENAME_LEN - 1] = '\0';
+
+                memcpy(chunk+8+MAX_FILENAME_LEN, &total_chunks, 4);
+
+                memcpy(chunk+MAX_FILENAME_LEN+12, &num_files, 4);
+
+                memcpy(chunk+MAX_FILENAME_LEN+16, &bytesRead, 4);
+
+                memcpy(chunk+MAX_FILENAME_LEN+20, buffer, bytesRead);
+
 
                 // calc the checksum value
-                uint32_t checksum = calculate_checksum(chunk_data, SEG_SIZE - sizeof(uint32_t));
+                uint32_t checksum = calculate_checksum(chunk, CHUNK_SIZE - sizeof(uint32_t));
                 // inset the checksum value at the end of the segment
-                memcpy(chunk_data + SEG_SIZE - sizeof(uint32_t), &checksum, sizeof(uint32_t));
+                memcpy(chunk+CHUNK_SIZE-4, &checksum, 4);
         
-                // printf("Sequence: %u\n", *(uint32_t*)&chunk_data[0]);
-                // printf("File ID: %u\n", *(uint32_t*)&chunk_data[4]);
-                // printf("Total Chunks: %u\n", *(uint32_t*)&chunk_data[8]);
+                // printf("Sequence: %u\n", *(uint32_t*)&chunk[0]);
+                // printf("Filename: %s\n", &chunk[4]); 
+                // printf("Total Chunks: %u\n", *(uint32_t*)&chunk[36]);
+                // printf("num files: %u\n", *(uint32_t*)&chunk[40]);
+                // printf("data size: %u\n", *(uint32_t*)&chunk[44]);
+                // printf("checksum: %u\n", *(uint32_t*)&chunk[CHUNK_SIZE - 4]);
+
+
                 // printf("----------------------------\n");
-                //printf("%d", argc -1);
-                printf("%zu", bytesRead);
 
                 // multicast the segment
-                multicast_send(m, chunk_data, SEG_SIZE);
-
-                // save the chunk in the chunk buffer
-                memcpy(chunk_buffer[buffer_head].data, chunk_data, SEG_SIZE);
-                chunk_buffer[buffer_head].sequence_number = sequence_number;
-                chunk_buffer[buffer_head].file_id = file_id;
-                buffer_head = (buffer_head + 1) % BUFFER_SIZE;
-
-                free(chunk_data);
+                multicast_send(m, chunk, CHUNK_SIZE);
+                free(chunk);
 
                 // increase seq num
-                sequence_number++;
+                sequence_number += bytesRead;
             }
             // close file
             fclose(file);
