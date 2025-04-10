@@ -4,10 +4,12 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <pthread.h>
+
 
 #define CHUNK_SIZE 1024
 #define MAX_FILENAME_LEN 32
-#define HEADER_SIZE (MAX_FILENAME_LEN+16)
+#define HEADER_SIZE (MAX_FILENAME_LEN+20)
 #define MAX_DATA_SIZE (CHUNK_SIZE - HEADER_SIZE - sizeof(uint32_t))
 
 typedef struct FileReconstructor {
@@ -44,7 +46,7 @@ FileReconstructor* create_reconstructor (const char *filename, uint32_t total_ch
     return new_rec;
 }
 
-void process_chunk(FileReconstructor *rec, uint32_t seq_num, const char *chunk_data, uint32_t data_size) {
+void process_chunk(FileReconstructor *rec, uint32_t seq_num, const char *chunk_data, uint32_t data_size, uint32_t files_left, uint32_t total_files) {
     if (seq_num >= rec->total_chunks*CHUNK_SIZE) {
         fprintf(stderr, "Invalid sequence %u for file %s\n", seq_num, rec->file_id);
         return;
@@ -57,11 +59,13 @@ void process_chunk(FileReconstructor *rec, uint32_t seq_num, const char *chunk_d
         rec->received_chunks++;
         rec->received_bytes += data_size;
         
-        printf("File %s: %u/%u chunks (%.1f%%)\n", 
+        printf("File %s: %u/%u chunks (%.1f%%), Files downloaded: %u, Files left: %u\n", 
                rec->file_id,
                rec->received_chunks,
                rec->total_chunks,
-               (float)rec->received_chunks/rec->total_chunks*100);
+               (float)rec->received_chunks/rec->total_chunks*100,
+                total_files - files_left,
+                files_left);
     }
 }
 
@@ -104,12 +108,95 @@ void save_and_remove(FileReconstructor *rec, uint32_t *files_left) {
     free(rec);
 }
 
+uint32_t calculate_checksum(const char *data, size_t length) {
+    uint32_t checksum = 0;
+    for (size_t i = 0; i < length; i++) {
+        checksum += (unsigned char)data[i];
+    }
+    return checksum;
+}
 
-int main() {
+void* send_connection(void* arg) {
+    uint32_t id = *(uint32_t*)arg;
+    mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
+    // send join msg to sender
+    char *chunk = malloc(CHUNK_SIZE);
+        
+    uint32_t type = 1;
+    memcpy(chunk, &type, 4);
+    uint32_t join = 1;
+    memcpy(chunk + 4, &join, 4);
+    memcpy(chunk + 8, &id, 4);
+
+    multicast_send(m, chunk, CHUNK_SIZE);
+    free(chunk);
+
+    printf("sent connection\n");
+
+    return NULL;
+}
+
+void* send_disconnection(void* arg) {
+    uint32_t id = *(uint32_t*)arg;
+    mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
+    // send join msg to sender
+    char *chunk = malloc(CHUNK_SIZE);
+        
+    uint32_t type = 1;
+    memcpy(chunk, &type, 4);
+    uint32_t join = 0;
+    memcpy(chunk + 4, &join, 4);
+    memcpy(chunk + 8, &id, 4);
+
+    multicast_send(m, chunk, CHUNK_SIZE);
+    free(chunk);
+
+    printf("sent disconnection\n");
+
+    return NULL;
+}
+
+void* send_update(void* arg) {
+    uint32_t id = *(uint32_t*)arg;
+    mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
+    // send join msg to sender
+    char *chunk = malloc(CHUNK_SIZE);
+        
+    uint32_t type = 1;
+    memcpy(chunk, &type, 4);
+    uint32_t join = 2;
+    memcpy(chunk + 4, &join, 4);
+    memcpy(chunk + 8, &id, 4);
+
+    multicast_send(m, chunk, CHUNK_SIZE);
+    free(chunk);
+
+    printf("sent update\n");
+
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    // process args
+    if (argc != 2) {
+        printf("Usage: %s <id>\n", argv[0]);
+        return 1;
+    }
+
+    uint32_t recv_id = (uint32_t) strtoul(argv[1], NULL, 10);
+
     mcast_t *m = multicast_init("239.0.0.1", 5000, 5000);
 
     unsigned char buffer[CHUNK_SIZE];
     uint32_t files_left = -1;
+    uint32_t total_files = -1;
+
+    // start thread to send connection
+    pthread_t thread_id;
+    if (pthread_create(&thread_id, NULL, send_connection, &recv_id) != 0) {
+        perror("Failed to create thread");
+        return 1;
+    }
 
     multicast_setup_recv(m);
     printf("Receiver ready. Processing multiple files...\n");
@@ -120,29 +207,35 @@ int main() {
             if (bytes_received <= 0) continue;
 
             // Parse header
-            uint32_t seq_num = *(uint32_t*)&buffer[0];
+            uint32_t type = *(uint32_t*)&buffer[0];
+            // check if type is data or control
+            if (type == 1) {
+                continue;
+            }
+            uint32_t seq_num = *(uint32_t*)&buffer[4];
 
             char file_id[MAX_FILENAME_LEN + 1];
-            strncpy(file_id, (const char*)&buffer[4], MAX_FILENAME_LEN);
-            uint32_t total_chunks = *(uint32_t*)&buffer[36];
-            uint32_t num_files = *(uint32_t*)&buffer[40];
-            uint32_t data_size = *(uint32_t*)&buffer[44];
+            strncpy(file_id, (const char*)&buffer[8], MAX_FILENAME_LEN);
+            uint32_t total_chunks = *(uint32_t*)&buffer[40];
+            uint32_t num_files = *(uint32_t*)&buffer[44];
+            uint32_t data_size = *(uint32_t*)&buffer[48];
             uint32_t checksum = *(uint32_t*)&buffer[CHUNK_SIZE-4];
 
             // Verify checksum
-            // if (calculate_checksum(buffer, buffer_size-4) != checksum) {
-            //     fprintf(stderr, "Bad checksum for file %u chunk %u\n", file_id, seq_num);
-            //     continue;
-            // }
+            if (calculate_checksum((const char *)buffer, CHUNK_SIZE - sizeof(uint32_t)) != checksum) {
+                fprintf(stderr, "Bad checksum for file %s chunk %u\n", file_id, seq_num);
+                continue;
+            }
 
             if (files_left == -1) {
                 // init num files
                 files_left = num_files;
+                total_files = num_files;
             }
 
             if (files_left == 0) {
                 // finished reading files, stop
-                printf("finished reading files.");
+                printf("finished reading files.\n");
                 break;
             }
 
@@ -154,19 +247,29 @@ int main() {
             }
 
             // Process chunk
-            process_chunk(rec, seq_num, (char*)&buffer[HEADER_SIZE], data_size);
+            process_chunk(rec, seq_num, (char*)&buffer[HEADER_SIZE], data_size, files_left, total_files);
 
             // Check completion
             if (rec->received_chunks == rec->total_chunks) {
                 save_and_remove(rec, &files_left);
+
+                // send update packet
+                pthread_t thread_id;
+                if (pthread_create(&thread_id, NULL, send_update, &recv_id) != 0) {
+                    perror("Failed to create thread");
+                    return 1;
+                }
             }
 
         }
-        // } else {
-        //     usleep(10000); // 10ms delay
-        // }
     }
 
-    //multicast_close(m);
+    // start thread to send connection
+    pthread_t thread_id2;
+    if (pthread_create(&thread_id2, NULL, send_disconnection, &recv_id) != 0) {
+        perror("Failed to create thread");
+        return 1;
+    }
+    sleep(1);
     return 0;
 }
