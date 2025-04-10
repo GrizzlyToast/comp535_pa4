@@ -20,7 +20,7 @@ int verify_checksum(char *data, size_t size, uint32_t expected_checksum) {
 
 void write_to_file(const char *filename, const char *data, size_t size) {
     char filepath[256];
-    snprintf(filepath, sizeof(filepath), "../received/%s", filename);
+    snprintf(filepath, sizeof(filepath), "received_files/%s", filename);
     FILE *file = fopen(filepath, "w");
     if (file == NULL) {
         perror("Failed to open file");
@@ -87,6 +87,8 @@ int main(int argc, char *argv[]) {
     }
 
     // Call the function to write ordered_msg to a file
-    write_to_file("output_file", ordered_msg, total_chunks * chunk_size);
+    char filename[256];
+    snprintf(filename, sizeof(filename), "file_%d", init_file_ID);
+    write_to_file(filename, ordered_msg, total_chunks * chunk_size);
 }
 
