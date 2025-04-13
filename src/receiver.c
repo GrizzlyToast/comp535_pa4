@@ -88,12 +88,13 @@ const char *get_basename(const char *path) {
 void save_and_remove(FileReconstructor *rec, uint32_t *files_left) {
     const char *filename = get_basename(rec->file_id);
     FILE *file = fopen(filename, "wb");
-    if (file) {
-        fwrite(rec->file_buffer, 1, rec->received_bytes, file);
-        fclose(file);
-        printf("Saved %s (%u chunks)\n", rec->file_id, rec->total_chunks);
-        (*files_left)--;
+    if (file == NULL) {
+        perror("Error opening file");
     }
+    fwrite(rec->file_buffer, 1, rec->received_bytes, file);
+    fclose(file);
+    printf("Saved %s (%u chunks)\n", rec->file_id, rec->total_chunks);
+    (*files_left)--;
     
     // Remove from list
     if (reconstructor_list == rec) {
