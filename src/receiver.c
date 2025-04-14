@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdbool.h>
 
 
 #define CHUNK_SIZE 1024
@@ -19,6 +20,7 @@ typedef struct FileReconstructor {
     uint32_t received_bytes;
     char *file_buffer;
     struct FileReconstructor *next;
+    bool is_done;
 } FileReconstructor;
 
 FileReconstructor *reconstructor_list = NULL;
@@ -32,6 +34,7 @@ FileReconstructor* create_reconstructor (const char *filename, uint32_t total_ch
     new_rec->total_chunks = total_chunks;
     new_rec->received_chunks = 0;
     new_rec->received_bytes = 0;
+    new_rec->is_done = false;
 
     new_rec->file_buffer = malloc(total_chunks * CHUNK_SIZE);
     if (!new_rec->file_buffer) {
@@ -82,7 +85,7 @@ FileReconstructor* find_reconstructor(char *file_id) {
 
 const char *get_basename(const char *path) {
     const char *base = strrchr(path, '/');
-    return base ? base + 1 : path;  // Skip the '/' character
+    return base ? base + 1 : path;
 }
 
 void save_and_remove(FileReconstructor *rec, uint32_t *files_left) {
@@ -91,22 +94,26 @@ void save_and_remove(FileReconstructor *rec, uint32_t *files_left) {
     if (file == NULL) {
         perror("Error opening file");
     }
-    fwrite(rec->file_buffer, 1, rec->received_bytes, file);
-    fclose(file);
-    printf("Saved %s (%u chunks)\n", rec->file_id, rec->total_chunks);
-    (*files_left)--;
+    if (file) {
+        fwrite(rec->file_buffer, 1, rec->received_bytes, file);
+        fclose(file);
+        printf("Saved %s (%u chunks)\n", rec->file_id, rec->total_chunks);
+        (*files_left)--;
+    }
+
+    rec->is_done = true;
     
     // Remove from list
-    if (reconstructor_list == rec) {
-        reconstructor_list = rec->next;
-    } else {
-        FileReconstructor *prev = reconstructor_list;
-        while (prev && prev->next != rec) prev = prev->next;
-        if (prev) prev->next = rec->next;
-    }
+    // if (reconstructor_list == rec) {
+    //     reconstructor_list = rec->next;
+    // } else {
+    //     FileReconstructor *prev = reconstructor_list;
+    //     while (prev && prev->next != rec) prev = prev->next;
+    //     if (prev) prev->next = rec->next;
+    // }
     
     free(rec->file_buffer);
-    free(rec);
+    //free(rec);
 }
 
 uint32_t calculate_checksum(const char *data, size_t length) {
@@ -247,6 +254,11 @@ int main(int argc, char *argv[]) {
                 printf("New file detected: ID=%s (%u chunks)\n", file_id, total_chunks);
             }
 
+            // check if file is done
+            if (rec->is_done) {
+                continue;
+            }
+
             // Process chunk
             process_chunk(rec, seq_num, (char*)&buffer[HEADER_SIZE], data_size, files_left, total_files);
 
@@ -255,8 +267,8 @@ int main(int argc, char *argv[]) {
                 save_and_remove(rec, &files_left);
 
                 // send update packet
-                pthread_t thread_id;
-                if (pthread_create(&thread_id, NULL, send_update, &recv_id) != 0) {
+                pthread_t thread_id2;
+                if (pthread_create(&thread_id2, NULL, send_update, &recv_id) != 0) {
                     perror("Failed to create thread");
                     return 1;
                 }
@@ -265,9 +277,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // start thread to send connection
-    pthread_t thread_id2;
-    if (pthread_create(&thread_id2, NULL, send_disconnection, &recv_id) != 0) {
+    // start thread to send disconnection
+    pthread_t thread_id3;
+    if (pthread_create(&thread_id3, NULL, send_disconnection, &recv_id) != 0) {
         perror("Failed to create thread");
         return 1;
     }

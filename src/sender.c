@@ -202,16 +202,6 @@ int main(int argc, char *argv[]) {
                 uint32_t checksum = calculate_checksum(chunk, CHUNK_SIZE - sizeof(uint32_t));
                 // inset the checksum value at the end of the segment
                 memcpy(chunk+CHUNK_SIZE-4, &checksum, 4);
-        
-                // printf("Sequence: %u\n", *(uint32_t*)&chunk[0]);
-                // printf("Filename: %s\n", &chunk[4]); 
-                // printf("Total Chunks: %u\n", *(uint32_t*)&chunk[36]);
-                // printf("num files: %u\n", *(uint32_t*)&chunk[40]);
-                // printf("data size: %u\n", *(uint32_t*)&chunk[44]);
-                // printf("checksum: %u\n", *(uint32_t*)&chunk[CHUNK_SIZE - 4]);
-
-
-                // printf("----------------------------\n");
 
                 // multicast the segment
                 multicast_send(m, chunk, CHUNK_SIZE);
